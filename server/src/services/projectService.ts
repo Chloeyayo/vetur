@@ -35,7 +35,7 @@ import {
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { URI } from 'vscode-uri';
 import { LanguageId } from '../embeddedSupport/embeddedSupport';
-import { LanguageMode, LanguageModes } from '../embeddedSupport/languageModes';
+import { LanguageMode, LanguageModes, ValidationLevel } from '../embeddedSupport/languageModes';
 import { NULL_COMPLETION, NULL_HOVER, NULL_SIGNATURE } from '../modes/nullMode';
 import { DocumentContext, CodeActionData, SemanticTokenData } from '../types';
 import { VCancellationToken } from '../utils/cancellationToken';
@@ -66,7 +66,11 @@ export interface ProjectService {
   onCodeActionResolve(action: CodeAction): Promise<CodeAction>;
   onWillRenameFile(fileRename: FileRename): Promise<TextDocumentEdit[]>;
   onSemanticTokens(params: SemanticTokensParams | SemanticTokensRangeParams): Promise<SemanticTokens>;
-  doValidate(doc: TextDocument, cancellationToken?: VCancellationToken): Promise<Diagnostic[] | null>;
+  doValidate(
+    doc: TextDocument,
+    cancellationToken?: VCancellationToken,
+    level?: ValidationLevel
+  ): Promise<Diagnostic[] | null>;
   dispose(): Promise<void>;
 }
 
@@ -373,21 +377,21 @@ export async function createProjectService(
 
       return builder.build();
     },
-    async doValidate(doc: TextDocument, cancellationToken?: VCancellationToken) {
+    async doValidate(doc: TextDocument, cancellationToken?: VCancellationToken, level: ValidationLevel = 'full') {
       const diagnostics: Diagnostic[] = [];
       if (doc.languageId === 'vue') {
         const validationFlags = getValidationFlags();
         for (const lmr of languageModes.getAllLanguageModeRangesInDocument(doc)) {
           if (lmr.mode.doValidation) {
             if (validationFlags[lmr.mode.getId()]) {
-              diagnostics.push.apply(diagnostics, await lmr.mode.doValidation(doc, cancellationToken));
+              diagnostics.push.apply(diagnostics, await lmr.mode.doValidation(doc, cancellationToken, level));
             }
             // Special case for template type checking
             else if (
               lmr.mode.getId() === 'vue-html' &&
               env.getConfig().vetur.experimental.templateInterpolationService
             ) {
-              diagnostics.push.apply(diagnostics, await lmr.mode.doValidation(doc, cancellationToken));
+              diagnostics.push.apply(diagnostics, await lmr.mode.doValidation(doc, cancellationToken, level));
             }
           }
         }

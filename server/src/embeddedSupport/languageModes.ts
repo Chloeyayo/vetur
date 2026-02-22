@@ -50,11 +50,17 @@ export interface VLSServices {
   refTokensService: RefTokensService;
 }
 
+export type ValidationLevel = 'syntactic' | 'full';
+
 export interface LanguageMode {
   getId(): string;
   updateFileInfo?(doc: TextDocument): void;
 
-  doValidation?(document: TextDocument, cancellationToken?: VCancellationToken): Promise<Diagnostic[]>;
+  doValidation?(
+    document: TextDocument,
+    cancellationToken?: VCancellationToken,
+    level?: ValidationLevel
+  ): Promise<Diagnostic[]>;
   getCodeActions?(
     document: TextDocument,
     range: Range,

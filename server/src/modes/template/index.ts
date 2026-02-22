@@ -2,7 +2,7 @@ import { FormattingOptions, Position, Range, Hover, Location, CompletionItem } f
 import type { TextDocument } from 'vscode-languageserver-textdocument';
 import { VueDocumentRegions } from '../../embeddedSupport/embeddedSupport';
 import { LanguageModelCache, getLanguageModelCache } from '../../embeddedSupport/languageModelCache';
-import { LanguageMode } from '../../embeddedSupport/languageModes';
+import { LanguageMode, ValidationLevel } from '../../embeddedSupport/languageModes';
 import { VueInfoService } from '../../services/vueInfoService';
 import { DocumentContext } from '../../types';
 import { HTMLMode } from './htmlMode';
@@ -55,9 +55,9 @@ export class VueHTMLMode implements LanguageMode {
   queryVirtualFileInfo(fileName: string, currFileText: string) {
     return this.vueInterpolationMode.queryVirtualFileInfo(fileName, currFileText);
   }
-  async doValidation(document: TextDocument, cancellationToken?: VCancellationToken) {
+  async doValidation(document: TextDocument, cancellationToken?: VCancellationToken, level?: ValidationLevel) {
     return Promise.all([
-      this.vueInterpolationMode.doValidation(document, cancellationToken),
+      this.vueInterpolationMode.doValidation(document, cancellationToken, level),
       this.htmlMode.doValidation(document, cancellationToken)
     ]).then(result => [...result[0], ...result[1]]);
   }

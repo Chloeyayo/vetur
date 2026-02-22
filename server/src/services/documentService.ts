@@ -27,4 +27,7 @@ export class DocumentService {
   get onDidClose() {
     return this.documents.onDidClose;
   }
+  get onDidSave() {
+    return this.documents.onDidSave;
+  }
 }

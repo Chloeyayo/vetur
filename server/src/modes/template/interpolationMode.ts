@@ -14,7 +14,7 @@ import {
 import { URI } from 'vscode-uri';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { LanguageModelCache } from '../../embeddedSupport/languageModelCache';
-import { LanguageMode } from '../../embeddedSupport/languageModes';
+import { LanguageMode, ValidationLevel } from '../../embeddedSupport/languageModes';
 import { IServiceHost } from '../../services/typescriptService/serviceHost';
 import { mapBackRange, mapFromPositionToOffset } from '../../services/typescriptService/sourceMap';
 import type ts from 'typescript';
@@ -67,7 +67,17 @@ export class VueInterpolationMode implements LanguageMode {
     );
   }
 
-  async doValidation(document: TextDocument, cancellationToken?: VCancellationToken): Promise<Diagnostic[]> {
+  async doValidation(
+    document: TextDocument,
+    cancellationToken?: VCancellationToken,
+    level?: ValidationLevel
+  ): Promise<Diagnostic[]> {
+    // Template interpolation validation is purely semantic (type checking).
+    // Skip entirely during syntactic-only validation for fast keystroke response.
+    if (level === 'syntactic') {
+      return [];
+    }
+
     if (await isVCancellationRequested(cancellationToken)) {
       return [];
     }

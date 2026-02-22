@@ -131,7 +131,79 @@ this.documentService.getAllDocuments().forEach(d => {
 
 ---
 
-## 优化 4：虚拟文件跨操作复用（消除 6 倍冗余）— 未实施
+## 优化 4：两级验证 — 按键时仅语法检查，保存/空闲时语义检查（Syntactic / Semantic 分离）
+
+### 问题
+
+**文件**:
+- `server/src/services/vls.ts` 行 694-736
+- `server/src/modes/script/javascript.ts` 行 161-235
+- `server/src/modes/template/interpolationMode.ts` 行 70-117
+
+每次按键（200ms debounce 后）触发 `doValidation`，内部同时调用三种 TypeScript 诊断：
+
+```typescript
+let rawScriptDiagnostics = [
+  ...program.getSyntacticDiagnostics(sourceFile, ...),  // ~1-5ms
+  ...program.getSemanticDiagnostics(sourceFile, ...),    // ~50-500ms
+  ...service.getSuggestionDiagnostics(fileFsPath)        // ~10-100ms
+];
+```
+
+`getSemanticDiagnostics` 是真正的性能杀手——它需要完整的类型推断、import 解析、泛型实例化。对 10K 行文件，这一个调用就占总耗时的 90%+。模板插值模式的 `doValidation` 同样只做 `getSemanticDiagnostics`（纯语义检查），每次按键都触发。
+
+### 改动
+
+**新增类型**: `server/src/embeddedSupport/languageModes.ts`
+
+```typescript
+export type ValidationLevel = 'syntactic' | 'full';
+```
+
+`LanguageMode.doValidation` 接口增加可选 `level` 参数。
+
+**`server/src/services/vls.ts`**:
+
+1. 新增 `pendingFullValidationRequests` Map 和 `fullValidationDelayMs = 3000`
+2. `onDidChangeContent` 触发两层：
+   - 立即（200ms debounce）触发 `triggerValidation(doc, 'syntactic')`
+   - 同时启动 `triggerFullValidation(doc)` — 3s 后触发完整验证
+3. `onDidSave` 立即触发 `triggerValidation(doc, 'full')`
+4. `DocumentService` 新增 `onDidSave` getter
+
+**`server/src/modes/script/javascript.ts`**:
+
+```typescript
+async doValidation(doc, cancellationToken?, level = 'full') {
+  let rawScriptDiagnostics: ts.Diagnostic[] = [
+    ...program.getSyntacticDiagnostics(...)
+  ];
+  if (level === 'full') {
+    rawScriptDiagnostics.push(
+      ...program.getSemanticDiagnostics(...),
+      ...service.getSuggestionDiagnostics(...)
+    );
+  }
+}
+```
+
+**`server/src/modes/template/interpolationMode.ts`**:
+
+模板插值验证是纯语义检查，`level === 'syntactic'` 时直接返回空数组。
+
+### 性能影响
+
+| 场景 | 优化前 | 优化后 |
+|------|--------|--------|
+| 单次按键（10K行文件） | ~100-500ms | ~1-5ms（仅语法） |
+| 快速连续输入 | 每次都跑语义检查 | 仅语法，空闲 3s 后 1 次语义 |
+| 保存时 | 同上 | 立即完整语义检查 |
+
+**核心收益**: 按键验证延迟降低 50-100 倍。
+
+---
+
+## 优化 5：虚拟文件跨操作复用（消除 6 倍冗余）— 未实施
 
 ### 问题
 
@@ -183,7 +255,7 @@ private getOrUpdateTemplateService(document: TextDocument) {
 
 ---
 
-## 优化 5：区域解析增量化（跳过 99% 的全量扫描）— 未实施
+## 优化 6：区域解析增量化（跳过 99% 的全量扫描）— 未实施
 
 ### 问题
 
@@ -222,7 +294,7 @@ refreshAndGet(document: TextDocument): T {
 
 ---
 
-## 优化 6：`getSingleLanguageDocument()` 字符串构造优化 — 未实施
+## 优化 7：`getSingleLanguageDocument()` 字符串构造优化 — 未实施
 
 ### 问题
 
@@ -268,7 +340,7 @@ export function getSingleLanguageDocument(
 
 ---
 
-## 优化 7：`getScriptFileNames()` 缓存化 — 未实施
+## 优化 8：`getScriptFileNames()` 缓存化 — 未实施
 
 ### 问题
 
@@ -300,7 +372,7 @@ getScriptFileNames: () => {
 
 ---
 
-## 优化 8：Source Map 线性搜索改为二分查找 — 未实施
+## 优化 9：Source Map 线性搜索改为二分查找 — 未实施
 
 ### 问题
 
@@ -334,7 +406,7 @@ function findSourceMapNode(nodes: TemplateSourceMapNode[], offset: number): Temp
 
 ---
 
-## 优化 9：Source Map 按版本缓存（避免每次按键重建）— 未实施
+## 优化 10：Source Map 按版本缓存（避免每次按键重建）— 未实施
 
 ### 问题
 
@@ -373,7 +445,7 @@ function recreateVueTemplateSourceFile(...) {
 
 ---
 
-## 优化 10：验证延迟自适应（大文件自动增加 debounce）— 未实施
+## 优化 11：验证延迟自适应（大文件自动增加 debounce）— 未实施
 
 ### 问题
 
@@ -409,7 +481,7 @@ private triggerValidation(textDocument: TextDocument): void {
 
 ---
 
-## 优化 11：`isVCancellationRequested` 改为同步检查 — 未实施
+## 优化 12：`isVCancellationRequested` 改为同步检查 — 未实施
 
 ### 问题
 
@@ -449,7 +521,7 @@ export function isVCancellationRequested(token?: VCancellationToken): boolean {
 
 ---
 
-## 优化 12：`foldSourceMapNodes` 数组拼接 O(n²) → O(n) — 未实施
+## 优化 13：`foldSourceMapNodes` 数组拼接 O(n²) → O(n) — 未实施
 
 ### 问题
 
@@ -485,7 +557,7 @@ function foldSourceMapNodes(nodes: TemplateSourceMapNode[]): TemplateSourceMapNo
 
 ---
 
-## 优化 13：内存泄漏修复 — 无界 Map 清理 — 未实施
+## 优化 14：内存泄漏修复 — 无界 Map 清理 — 未实施
 
 ### 问题
 
@@ -516,24 +588,24 @@ removeInfo(uri: string) {
 
 ## 验证
 
-### 已实施（优化 1-3）
+### 已实施（优化 1-4）
 
 - `cd server && yarn test` — **185 passing, 0 failing**
 - TypeScript 编译无错误（`tsc -p tsconfig.test.json` 通过）
 
-### 未实施（优化 4-13）
+### 未实施（优化 5-14）
 
 以上优化点为设计文档，供后续逐项实施参考。各项按影响程度排序：
 
 | 优化 | 影响程度 | 复杂度 | 目标文件 |
 |------|----------|--------|----------|
-| 4. 虚拟文件跨操作复用 | 高 | 低 | `interpolationMode.ts` |
-| 5. 区域解析增量化 | 高 | 中 | `vueDocumentRegionParser.ts`, `languageModelCache.ts` |
-| 6. 字符串构造优化 | 中 | 低 | `embeddedSupport.ts` |
-| 7. getScriptFileNames 缓存 | 中 | 低 | `serviceHost.ts` |
-| 8. Source Map 二分查找 | 中 | 低 | `sourceMap.ts` |
-| 9. Source Map 版本缓存 | 中 | 低 | `preprocess.ts` |
-| 10. 验证延迟自适应 | 中 | 低 | `vls.ts` |
-| 11. 同步取消检查 | 低 | 低 | `cancellationToken.ts` |
-| 12. foldSourceMapNodes O(n) | 低 | 低 | `sourceMap.ts` |
-| 13. 无界 Map 清理 | 低 | 低 | `serviceHost.ts`, `vueInfoService.ts` |
+| 5. 虚拟文件跨操作复用 | 高 | 低 | `interpolationMode.ts` |
+| 6. 区域解析增量化 | 高 | 中 | `vueDocumentRegionParser.ts`, `languageModelCache.ts` |
+| 7. 字符串构造优化 | 中 | 低 | `embeddedSupport.ts` |
+| 8. getScriptFileNames 缓存 | 中 | 低 | `serviceHost.ts` |
+| 9. Source Map 二分查找 | 中 | 低 | `sourceMap.ts` |
+| 10. Source Map 版本缓存 | 中 | 低 | `preprocess.ts` |
+| 11. 验证延迟自适应 | 中 | 低 | `vls.ts` |
+| 12. 同步取消检查 | 低 | 低 | `cancellationToken.ts` |
+| 13. foldSourceMapNodes O(n) | 低 | 低 | `sourceMap.ts` |
+| 14. 无界 Map 清理 | 低 | 低 | `serviceHost.ts`, `vueInfoService.ts` |

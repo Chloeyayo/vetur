@@ -30,7 +30,7 @@ import {
   VersionedTextDocumentIdentifier
 } from 'vscode-languageserver-types';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { LanguageMode } from '../../embeddedSupport/languageModes';
+import { LanguageMode, ValidationLevel } from '../../embeddedSupport/languageModes';
 import { VueDocumentRegions, LanguageRange, LanguageId } from '../../embeddedSupport/embeddedSupport';
 import { prettierify, prettierEslintify, prettierTslintify } from '../../utils/prettier';
 import { getFileFsPath, getFilePath } from '../../utils/paths';
@@ -158,7 +158,11 @@ export async function getJavascriptMode(
       }
     },
 
-    async doValidation(doc: TextDocument, cancellationToken?: VCancellationToken): Promise<Diagnostic[]> {
+    async doValidation(
+      doc: TextDocument,
+      cancellationToken?: VCancellationToken,
+      level: ValidationLevel = 'full'
+    ): Promise<Diagnostic[]> {
       if (await isVCancellationRequested(cancellationToken)) {
         return [];
       }
@@ -177,18 +181,25 @@ export async function getJavascriptMode(
         return [];
       }
 
-      let rawScriptDiagnostics = [
-        ...program.getSyntacticDiagnostics(sourceFile, cancellationToken?.tsToken),
-        ...program.getSemanticDiagnostics(sourceFile, cancellationToken?.tsToken),
-        ...service.getSuggestionDiagnostics(fileFsPath)
+      let rawScriptDiagnostics: ts.Diagnostic[] = [
+        ...program.getSyntacticDiagnostics(sourceFile, cancellationToken?.tsToken)
       ];
 
-      const compilerOptions = program.getCompilerOptions();
-      if (compilerOptions.declaration || compilerOptions.composite) {
-        rawScriptDiagnostics = [
-          ...rawScriptDiagnostics,
-          ...program.getDeclarationDiagnostics(sourceFile, cancellationToken?.tsToken)
-        ];
+      if (level === 'full') {
+        rawScriptDiagnostics.push(
+          ...program.getSemanticDiagnostics(sourceFile, cancellationToken?.tsToken),
+          ...service.getSuggestionDiagnostics(fileFsPath)
+        );
+      }
+
+      if (level === 'full') {
+        const compilerOptions = program.getCompilerOptions();
+        if (compilerOptions.declaration || compilerOptions.composite) {
+          rawScriptDiagnostics = [
+            ...rawScriptDiagnostics,
+            ...program.getDeclarationDiagnostics(sourceFile, cancellationToken?.tsToken)
+          ];
+        }
       }
 
       const scriptSetupRange = documentRegions

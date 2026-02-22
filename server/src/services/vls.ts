@@ -62,6 +62,7 @@ import { VueHTMLMode } from '../modes/template';
 import { logger } from '../log';
 import { getDefaultVLSConfig, VLSFullConfig, getVeturFullConfig, VeturFullConfig, BasicComponentInfo } from '../config';
 import { VCancellationToken, VCancellationTokenSource } from '../utils/cancellationToken';
+import { ValidationLevel } from '../embeddedSupport/languageModes';
 import { findConfigFile, requireUncached } from '../utils/workspace';
 import { createProjectService, ProjectService } from './projectService';
 import { createEnvironmentService } from './EnvironmentService';
@@ -95,8 +96,14 @@ export class VLS {
   private loadingProjects: string[];
   private projects: Map<string, ProjectService>;
   private pendingValidationRequests: { [uri: string]: NodeJS.Timer } = {};
-  private cancellationTokenValidationRequests: { [uri: string]: VCancellationTokenSource } = {};
+  private pendingFullValidationRequests: {
+    [uri: string]: NodeJS.Timer;
+  } = {};
+  private cancellationTokenValidationRequests: {
+    [uri: string]: VCancellationTokenSource;
+  } = {};
   private validationDelayMs = 200;
+  private fullValidationDelayMs = 3000;
 
   private documentFormatterRegistration: Disposable | undefined;
 
@@ -218,7 +225,9 @@ export class VLS {
       this.setupDynamicFormatters(isFormatEnable);
     });
 
-    this.documentService.getAllDocuments().forEach(this.triggerValidation);
+    this.documentService.getAllDocuments().forEach(d => {
+      this.triggerValidation(d);
+    });
   }
 
   private getAllProjectConfigs(): ProjectConfig[] {
@@ -477,7 +486,12 @@ export class VLS {
 
   private setupFileChangeListeners() {
     this.documentService.onDidChangeContent(change => {
-      this.triggerValidation(change.document);
+      this.triggerValidation(change.document, 'syntactic');
+      this.triggerFullValidation(change.document);
+    });
+    this.documentService.onDidSave(change => {
+      this.cleanPendingFullValidation(change.document);
+      this.triggerValidation(change.document, 'full');
     });
     this.documentService.onDidClose(e => {
       this.removeDocument(e.document);
@@ -674,7 +688,7 @@ export class VLS {
     return project?.onSemanticTokens(params) ?? { data: [] as number[] };
   }
 
-  private triggerValidation(textDocument: TextDocument): void {
+  private triggerValidation(textDocument: TextDocument, level: ValidationLevel = 'full'): void {
     if (textDocument.uri.includes('node_modules')) {
       return;
     }
@@ -684,8 +698,20 @@ export class VLS {
     this.pendingValidationRequests[textDocument.uri] = setTimeout(() => {
       delete this.pendingValidationRequests[textDocument.uri];
       this.cancellationTokenValidationRequests[textDocument.uri] = new VCancellationTokenSource();
-      this.validateTextDocument(textDocument, this.cancellationTokenValidationRequests[textDocument.uri].token);
+      this.validateTextDocument(textDocument, this.cancellationTokenValidationRequests[textDocument.uri].token, level);
     }, this.validationDelayMs);
+  }
+
+  private triggerFullValidation(textDocument: TextDocument): void {
+    if (textDocument.uri.includes('node_modules')) {
+      return;
+    }
+
+    this.cleanPendingFullValidation(textDocument);
+    this.pendingFullValidationRequests[textDocument.uri] = setTimeout(() => {
+      delete this.pendingFullValidationRequests[textDocument.uri];
+      this.triggerValidation(textDocument, 'full');
+    }, this.fullValidationDelayMs);
   }
 
   cancelPastValidation(textDocument: TextDocument): void {
@@ -705,17 +731,32 @@ export class VLS {
     }
   }
 
-  async validateTextDocument(textDocument: TextDocument, cancellationToken?: VCancellationToken) {
-    const diagnostics = await this.doValidate(textDocument, cancellationToken);
-    if (diagnostics) {
-      this.lspConnection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
+  private cleanPendingFullValidation(textDocument: TextDocument): void {
+    const request = this.pendingFullValidationRequests[textDocument.uri];
+    if (request) {
+      clearTimeout(request);
+      delete this.pendingFullValidationRequests[textDocument.uri];
     }
   }
 
-  async doValidate(doc: TextDocument, cancellationToken?: VCancellationToken) {
+  async validateTextDocument(
+    textDocument: TextDocument,
+    cancellationToken?: VCancellationToken,
+    level: ValidationLevel = 'full'
+  ) {
+    const diagnostics = await this.doValidate(textDocument, cancellationToken, level);
+    if (diagnostics) {
+      this.lspConnection.sendDiagnostics({
+        uri: textDocument.uri,
+        diagnostics
+      });
+    }
+  }
+
+  async doValidate(doc: TextDocument, cancellationToken?: VCancellationToken, level: ValidationLevel = 'full') {
     const project = await this.getProjectService(doc.uri);
 
-    return project?.doValidate(doc, cancellationToken) ?? null;
+    return project?.doValidate(doc, cancellationToken, level) ?? null;
   }
 
   async executeCommand(arg: ExecuteCommandParams) {
