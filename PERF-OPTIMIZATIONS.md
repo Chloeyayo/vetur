@@ -131,7 +131,409 @@ this.documentService.getAllDocuments().forEach(d => {
 
 ---
 
+## 优化 4：虚拟文件跨操作复用（消除 6 倍冗余）— 未实施
+
+### 问题
+
+**文件**: `server/src/modes/template/interpolationMode.ts`
+
+`VueInterpolationMode` 类中，`doValidation`（行 70）、`doComplete`（行 119）、`doResolve`（行 213）、`doHover`（行 280）、`findDefinition`（行 344）、`findReferences`（行 395）六个方法各自独立执行：
+
+1. `TextDocument.create(uri + '.template', ..., document.getText())` — 拷贝整个 10K 行文件
+2. `this.serviceHost.updateCurrentVirtualVueTextDocument(templateDoc, childComponents)` — 触发模板转换 + source map 重建
+3. `this.getChildComponents(document)` — 遍历所有 language mode 范围 + 调用 `vueInfoService.getInfo()`
+
+同一个文件的同一个版本，这套流程被执行 6 次。
+
+### 修改思路
+
+在 `VueInterpolationMode` 类中添加缓存字段，提取公共方法：
+
+```typescript
+// 新增缓存字段
+private cachedUri?: string;
+private cachedVersion?: number;
+private cachedTemplateService?: ts.LanguageService;
+private cachedTemplateSourceMap?: TemplateSourceMap;
+
+private getOrUpdateTemplateService(document: TextDocument) {
+  if (this.cachedUri === document.uri && this.cachedVersion === document.version
+      && this.cachedTemplateService) {
+    return { templateService: this.cachedTemplateService, templateSourceMap: this.cachedTemplateSourceMap! };
+  }
+  const templateDoc = TextDocument.create(
+    document.uri + '.template', document.languageId, document.version, document.getText()
+  );
+  const result = this.serviceHost.updateCurrentVirtualVueTextDocument(
+    templateDoc, this.getChildComponents(document)
+  );
+  this.cachedUri = document.uri;
+  this.cachedVersion = document.version;
+  this.cachedTemplateService = result.templateService;
+  this.cachedTemplateSourceMap = result.templateSourceMap;
+  return result;
+}
+```
+
+6 个方法全部改用 `getOrUpdateTemplateService()` 替代各自独立的 `TextDocument.create()` + `updateCurrentVirtualVueTextDocument()` + `getChildComponents()` 调用。
+
+### 预期收益
+
+同版本操作从 6 次模板处理降为 1 次，每次按键后的 hover/completion 响应提速 ~5 倍。
+
+---
+
+## 优化 5：区域解析增量化（跳过 99% 的全量扫描）— 未实施
+
+### 问题
+
+**文件**: `server/src/embeddedSupport/vueDocumentRegionParser.ts`
+
+`parseVueDocumentRegions()`（行 22）在每次 `refreshAndGet()` 版本变更时全量扫描整个文件（逐 token 遍历 `while (token !== HtmlTokenType.EOS)`）来找 `<template>`、`<script>`、`<style>` 的边界。10K 行文件每次按键都触发。
+
+### 修改思路
+
+在 `languageModelCache.ts` 的 `refreshAndGet()` 中，新增变更范围感知逻辑：
+
+```typescript
+// 在 LanguageModelCache 中：
+refreshAndGet(document: TextDocument): T {
+  const cached = this.get(document);
+  if (cached && cached.version === document.version) return cached.model;
+
+  // 增量判断逻辑（仅对 VueDocumentRegions 类型生效）
+  if (cached && this.canReuseRegions(cached, document)) {
+    return this.adjustRegionOffsets(cached, document);
+  }
+
+  // 回退到全量解析
+  return this.fullParse(document);
+}
+```
+
+**判断准则**: 取变更范围（通过 TextDocument 版本差异或 `contentChanges`），检查变更区间是否完全落在某个 region 的 `[start, end]` 内，且变更内容不包含 `<template`、`<script`、`<style`、`</template`、`</script`、`</style` 子串。
+
+- 如果变更位于某个已知 region 内部（不跨越 region 边界标签），则复用上一次的 region 划分结果，只更新该 region 的 `end` 偏移量（加上插入/删除的字符差）
+- 否则回退到全量解析
+
+### 预期收益
+
+90%+ 的按键（在 `<script>` 内编辑 JS 代码）跳过全量扫描，0ms 开销。
+
+---
+
+## 优化 6：`getSingleLanguageDocument()` 字符串构造优化 — 未实施
+
+### 问题
+
+**文件**: `server/src/embeddedSupport/embeddedSupport.ts` 行 129-147, 149-174
+
+每次调用先 `split('\n').map(line => ' '.repeat(line.length)).join('\n')` 构造全文件空白副本（O(n)），再对每个 region 做 `slice + concat + slice`（每个 region O(n)）。10K 行文件的 `getText()` 约 300-500KB，每次按键对 template/script/style 各调用一次 = 3 次全文件字符串重建。
+
+### 修改思路
+
+改用单次遍历按字符填充，避免多次 `slice + concat`：
+
+```typescript
+export function getSingleLanguageDocument(
+  document: TextDocument, regions: EmbeddedRegion[], languageId: LanguageId
+): TextDocument {
+  const oldContent = document.getText();
+  // 预计算 region 范围集合
+  const ranges: Array<[number, number]> = [];
+  for (const r of regions) {
+    if (r.languageId === languageId) ranges.push([r.start, r.end]);
+  }
+
+  // 单次遍历构造结果
+  const chars = new Array(oldContent.length);
+  let rangeIdx = 0;
+  for (let i = 0; i < oldContent.length; i++) {
+    const ch = oldContent.charCodeAt(i);
+    // 保留换行符位置不变（position mapping 需要）
+    if (ch === 10 || ch === 13) { chars[i] = oldContent[i]; continue; }
+    // 在目标 region 内则保留原文，否则替换为空格
+    while (rangeIdx < ranges.length && i >= ranges[rangeIdx][1]) rangeIdx++;
+    chars[i] = (rangeIdx < ranges.length && i >= ranges[rangeIdx][0]) ? oldContent[i] : ' ';
+  }
+  return TextDocument.create(document.uri, languageId, document.version, chars.join(''));
+}
+```
+
+同样修改 `getSingleTypeDocument()`（行 149-174），采用相同的单次遍历策略。
+
+### 预期收益
+
+从 O(n × region_count) 降为 O(n) 单次遍历，减少 ~60-70% 的字符串分配。
+
+---
+
+## 优化 7：`getScriptFileNames()` 缓存化 — 未实施
+
+### 问题
+
+**文件**: `server/src/services/typescriptService/serviceHost.ts` 行 336
+
+`getScriptFileNames: () => Array.from(scriptFileNameSet)` 在每次 TS 编译时被频繁调用，每次都从 `Set` 创建新数组。几百个文件 = 每次分配几百元素的数组。
+
+### 修改思路
+
+```typescript
+let cachedScriptFileNames: string[] | null = null;
+
+// 在所有 scriptFileNameSet.add() / .delete() 处（行 194, 200, 223, 236, 364, 442）：
+scriptFileNameSet.add(filePath);
+cachedScriptFileNames = null;  // 失效
+
+// getScriptFileNames 改为：
+getScriptFileNames: () => {
+  if (!cachedScriptFileNames) {
+    cachedScriptFileNames = Array.from(scriptFileNameSet);
+  }
+  return cachedScriptFileNames;
+}
+```
+
+### 预期收益
+
+绝大多数调用命中缓存，只在文件增删时重建一次。减少 GC 压力。
+
+---
+
+## 优化 8：Source Map 线性搜索改为二分查找 — 未实施
+
+### 问题
+
+**文件**: `server/src/services/typescriptService/sourceMap.ts` 行 193-206, 212-227, 236-251
+
+`mapFromOffsetToOffset`、`mapToRange`、`mapBackRange` 三个函数都对 `sourceMap[filePath]` 数组做线性遍历。10K 行模板的 source map 节点可达数百个，每次 completion/hover/definition 都要调用。
+
+### 修改思路
+
+source map 节点已按 `from.start` 排序（由 AST 遍历顺序保证），改用二分查找定位目标节点：
+
+```typescript
+function findSourceMapNode(nodes: TemplateSourceMapNode[], offset: number): TemplateSourceMapNode | undefined {
+  let lo = 0, hi = nodes.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const node = nodes[mid];
+    if (offset < node.from.start) { hi = mid - 1; }
+    else if (offset > node.from.end) { lo = mid + 1; }
+    else { return node; }
+  }
+  return undefined;
+}
+```
+
+同理对 `mapBackRange` 按 `to.start` 做二分查找（可能需要额外维护一个按 `to` 排序的索引）。
+
+### 预期收益
+
+从 O(n) 降为 O(log n)，对 500 节点的 map 从 ~500 次比较降到 ~9 次。
+
+---
+
+## 优化 9：Source Map 按版本缓存（避免每次按键重建）— 未实施
+
+### 问题
+
+**文件**: `server/src/services/typescriptService/preprocess.ts` 行 134-136
+
+`recreateVueTemplateSourceFile()` 中，每次 template source file 更新都调用 `generateSourceMap()` 重建整个 source map。`generateSourceMap()` 递归遍历两棵 AST 树的所有节点，对 10K 行模板非常昂贵。
+
+### 修改思路
+
+在 `recreateVueTemplateSourceFile` 前检查：如果 template 的文本内容未变（通过 hash 或版本号），跳过 `generateSourceMap`。已有 `(newSourceFile as any).version` 赋值（行 126），可用作缓存 key：
+
+```typescript
+// preprocess.ts
+const sourceMapCache = new Map<string, { version: string; nodes: TemplateSourceMapNode[] }>();
+
+function recreateVueTemplateSourceFile(...) {
+  // ... existing code to create newSourceFile ...
+  const version = (sourceFile as any).version;
+  const cached = sourceMapCache.get(vueTemplateFileName);
+  if (cached && cached.version === version) {
+    templateSourceMap[templateFsPath] = cached.nodes;
+    templateSourceMap[templateFsPath.slice(0, -'.template'.length)] = cached.nodes;
+  } else {
+    const sourceMapNodes = generateSourceMap(tsModule, sourceFile, newSourceFile);
+    templateSourceMap[templateFsPath] = sourceMapNodes;
+    templateSourceMap[templateFsPath.slice(0, -'.template'.length)] = sourceMapNodes;
+    sourceMapCache.set(vueTemplateFileName, { version, nodes: sourceMapNodes });
+  }
+  return newSourceFile;
+}
+```
+
+### 预期收益
+
+同版本的 template 跳过 AST 双树遍历 + offset mapping 构建，节省每次 ~10-50ms（取决于模板大小）。
+
+---
+
+## 优化 10：验证延迟自适应（大文件自动增加 debounce）— 未实施
+
+### 问题
+
+**文件**: `server/src/services/vls.ts` 行 99, 677-688
+
+`validationDelayMs = 200` 硬编码。对 10K 行文件，200ms 后触发的验证可能还没完成，下一次按键又触发新的验证。快速输入时产生大量排队的验证。
+
+### 修改思路
+
+```typescript
+private getValidationDelay(document: TextDocument): number {
+  const len = document.getText().length;
+  if (len > 200000) return 1000;  // >200KB: 1s
+  if (len > 100000) return 500;   // >100KB: 500ms
+  return 200;                      // 默认: 200ms
+}
+
+private triggerValidation(textDocument: TextDocument): void {
+  if (textDocument.uri.includes('node_modules')) return;
+  this.cleanPendingValidation(textDocument);
+  this.cancelPastValidation(textDocument);
+  this.pendingValidationRequests[textDocument.uri] = setTimeout(() => {
+    delete this.pendingValidationRequests[textDocument.uri];
+    this.cancellationTokenValidationRequests[textDocument.uri] = new VCancellationTokenSource();
+    this.validateTextDocument(textDocument, this.cancellationTokenValidationRequests[textDocument.uri].token);
+  }, this.getValidationDelay(textDocument));  // 替换 this.validationDelayMs
+}
+```
+
+### 预期收益
+
+10K 行文件输入更流畅，避免验证风暴。对小文件无影响。
+
+---
+
+## 优化 11：`isVCancellationRequested` 改为同步检查 — 未实施
+
+### 问题
+
+**文件**: `server/src/utils/cancellationToken.ts` 行 26-34
+
+当前实现使用 `setImmediate` + `Promise` 异步检查 cancellation：
+
+```typescript
+export function isVCancellationRequested(token?: VCancellationToken) {
+  return new Promise(resolve => {
+    if (!token) {
+      resolve(false);
+    } else {
+      setImmediate(() => resolve(token.isCancellationRequested));
+    }
+  });
+}
+```
+
+每次 `await isVCancellationRequested()` 都让出事件循环。验证流程中被调用多次，累积的 tick 切换开销可观，且延迟了实际的取消响应。
+
+### 修改思路
+
+```typescript
+export function isVCancellationRequested(token?: VCancellationToken): boolean {
+  return token ? token.isCancellationRequested : false;
+}
+```
+
+调用处从 `if (await isVCancellationRequested(token))` 改为 `if (isVCancellationRequested(token))`。
+
+**注意**: 原代码用 `setImmediate` 的意图是让事件循环有机会处理其他消息（如新的按键事件触发 cancel）。改为同步后，长时间运行的同步代码中间无法响应 cancel。但 Vetur 的验证主要是调用 TS Language Service（内部已有自己的 cancellation 机制），所以实际影响很小。
+
+### 预期收益
+
+消除每次验证流程中 4-6 次不必要的事件循环切换，响应更快。
+
+---
+
+## 优化 12：`foldSourceMapNodes` 数组拼接 O(n²) → O(n) — 未实施
+
+### 问题
+
+**文件**: `server/src/services/typescriptService/sourceMap.ts` 行 139-166
+
+`reduce` + `concat` 模式，每次 `concat` 创建新数组，总复杂度 O(n²)。
+
+### 修改思路
+
+改用 `push` 就地构建：
+
+```typescript
+function foldSourceMapNodes(nodes: TemplateSourceMapNode[]): TemplateSourceMapNode[] {
+  const folded: TemplateSourceMapNode[] = [];
+  for (const node of nodes) {
+    const last = folded[folded.length - 1];
+    if (!last || node.from.start < last.from.start || last.from.end < node.from.end) {
+      folded.push(node);
+    } else {
+      // merge into last
+      Object.assign(last.offsetMapping, node.offsetMapping);
+      Object.assign(last.offsetBackMapping, node.offsetBackMapping);
+      last.mergedNodes.push(node);
+    }
+  }
+  return folded;
+}
+```
+
+### 预期收益
+
+对 500 节点的 map，从 ~125K 次拷贝降为 500 次 push。
+
+---
+
+## 优化 13：内存泄漏修复 — 无界 Map 清理 — 未实施
+
+### 问题
+
+**文件**:
+- `server/src/services/typescriptService/serviceHost.ts` 行 28: `allChildComponentsInfo` Map
+- `server/src/services/vueInfoService.ts` 行 106: `vueFileInfo` Map
+
+两个 Map 只有 `set` 没有 `delete`，随文件打开不断增长，几百个文件的项目可能积累大量过时条目。
+
+### 修改思路
+
+**`allChildComponentsInfo`**: 在 `init()` 中清空，在文件从项目移除时 delete。
+
+**`vueFileInfo`**: 添加 `removeInfo()` 方法，在 `vls.ts` 的 `removeDocument` 中调用：
+
+```typescript
+// vueInfoService.ts
+removeInfo(uri: string) {
+  this.vueFileInfo.delete(getFileFsPath(uri));
+}
+```
+
+### 预期收益
+
+防止长时间运行后内存持续增长。对几百文件项目，可能节省数十 MB。
+
+---
+
 ## 验证
+
+### 已实施（优化 1-3）
 
 - `cd server && yarn test` — **185 passing, 0 failing**
 - TypeScript 编译无错误（`tsc -p tsconfig.test.json` 通过）
+
+### 未实施（优化 4-13）
+
+以上优化点为设计文档，供后续逐项实施参考。各项按影响程度排序：
+
+| 优化 | 影响程度 | 复杂度 | 目标文件 |
+|------|----------|--------|----------|
+| 4. 虚拟文件跨操作复用 | 高 | 低 | `interpolationMode.ts` |
+| 5. 区域解析增量化 | 高 | 中 | `vueDocumentRegionParser.ts`, `languageModelCache.ts` |
+| 6. 字符串构造优化 | 中 | 低 | `embeddedSupport.ts` |
+| 7. getScriptFileNames 缓存 | 中 | 低 | `serviceHost.ts` |
+| 8. Source Map 二分查找 | 中 | 低 | `sourceMap.ts` |
+| 9. Source Map 版本缓存 | 中 | 低 | `preprocess.ts` |
+| 10. 验证延迟自适应 | 中 | 低 | `vls.ts` |
+| 11. 同步取消检查 | 低 | 低 | `cancellationToken.ts` |
+| 12. foldSourceMapNodes O(n) | 低 | 低 | `sourceMap.ts` |
+| 13. 无界 Map 清理 | 低 | 低 | `serviceHost.ts`, `vueInfoService.ts` |
