@@ -30,7 +30,7 @@ export class VueHTMLMode implements LanguageMode {
     dependencyService: DependencyService,
     vueInfoService?: VueInfoService
   ) {
-    const vueDocuments = getLanguageModelCache<HTMLDocument>(10, 60, document => parseHTMLDocument(document));
+    const vueDocuments = getLanguageModelCache<HTMLDocument>(50, 60, document => parseHTMLDocument(document));
     this.htmlMode = new HTMLMode(
       documentRegions,
       env,

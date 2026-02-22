@@ -109,7 +109,7 @@ export class LanguageModes {
   private serviceHost: IServiceHost;
 
   constructor() {
-    this.documentRegions = getLanguageModelCache<VueDocumentRegions>(10, 60, document =>
+    this.documentRegions = getLanguageModelCache<VueDocumentRegions>(50, 60, document =>
       getVueDocumentRegions(document)
     );
 
@@ -123,7 +123,7 @@ export class LanguageModes {
     /**
      * Documents where everything outside `<script>` is replaced with whitespace
      */
-    const scriptRegionDocuments = getLanguageModelCache(10, 60, document => {
+    const scriptRegionDocuments = getLanguageModelCache(50, 60, document => {
       const vueDocument = this.documentRegions.refreshAndGet(document);
       return vueDocument.getSingleTypeDocument('script');
     });

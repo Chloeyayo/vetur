@@ -64,10 +64,10 @@ function getStyleMode(
   documentRegions: LanguageModelCache<VueDocumentRegions>,
   dependencyService: DependencyService
 ): LanguageMode {
-  const embeddedDocuments = getLanguageModelCache(10, 60, document =>
+  const embeddedDocuments = getLanguageModelCache(50, 60, document =>
     documentRegions.refreshAndGet(document).getSingleLanguageDocument(languageId)
   );
-  const stylesheets = getLanguageModelCache(10, 60, document => languageService.parseStylesheet(document));
+  const stylesheets = getLanguageModelCache(50, 60, document => languageService.parseStylesheet(document));
 
   let latestConfig = env.getConfig().css;
   function syncConfig() {

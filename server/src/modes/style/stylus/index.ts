@@ -26,7 +26,7 @@ export function getStylusMode(
   documentRegions: LanguageModelCache<VueDocumentRegions>,
   dependencyService: DependencyService
 ): LanguageMode {
-  const embeddedDocuments = getLanguageModelCache(10, 60, document =>
+  const embeddedDocuments = getLanguageModelCache(50, 60, document =>
     documentRegions.refreshAndGet(document).getSingleLanguageDocument('stylus')
   );
 

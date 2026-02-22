@@ -102,6 +102,9 @@ export function getServiceHost(
   let projectFileSnapshots = new Map<string, ts.IScriptSnapshot>();
   let moduleResolutionCache = new ModuleResolutionCache();
 
+  // Track previous snapshots for incremental compilation (getChangeRange)
+  let previousScriptSnapshots = new Map<string, { text: string; version: number }>();
+
   let parsedConfig: ts.ParsedCommandLine;
   let scriptFileNameSet: Set<string>;
 
@@ -133,6 +136,7 @@ export function getServiceHost(
     nodeModuleSnapshots = new Map<string, ts.IScriptSnapshot>();
     projectFileSnapshots = new Map<string, ts.IScriptSnapshot>();
     moduleResolutionCache = new ModuleResolutionCache();
+    previousScriptSnapshots = new Map<string, { text: string; version: number }>();
 
     parsedConfig = getParsedConfig(tsModule, env.getProjectRoot(), env.getTsConfigPath());
     const initialProjectFiles = parsedConfig.fileNames;
@@ -273,6 +277,56 @@ export function getServiceHost(
 
   function getFileNames() {
     return Array.from(scriptFileNameSet);
+  }
+
+  /**
+   * Create a script snapshot that tracks previous text for incremental compilation.
+   * When TypeScript calls getChangeRange(oldSnapshot), we compute the minimal
+   * TextChangeRange by comparing old and new text, enabling TS to do incremental
+   * re-parsing instead of full re-parse.
+   */
+  function createIncrementalSnapshot(fileName: string, fileText: string): ts.IScriptSnapshot {
+    const currentVersion = versions.get(fileName) || 0;
+    const prev = previousScriptSnapshots.get(fileName);
+
+    const snapshot: ts.IScriptSnapshot = {
+      getText: (start, end) => fileText.substring(start, end),
+      getLength: () => fileText.length,
+      getChangeRange: (oldSnapshot: ts.IScriptSnapshot) => {
+        if (prev && oldSnapshot.getLength() === prev.text.length) {
+          const oldText = prev.text;
+          // Find the first character that differs
+          const minLen = Math.min(oldText.length, fileText.length);
+          let prefixLen = 0;
+          while (prefixLen < minLen && oldText.charCodeAt(prefixLen) === fileText.charCodeAt(prefixLen)) {
+            prefixLen++;
+          }
+          // Find the last character that differs (scanning from end)
+          let oldSuffix = 0;
+          let newSuffix = 0;
+          while (
+            oldSuffix < oldText.length - prefixLen &&
+            newSuffix < fileText.length - prefixLen &&
+            oldText.charCodeAt(oldText.length - 1 - oldSuffix) === fileText.charCodeAt(fileText.length - 1 - newSuffix)
+          ) {
+            oldSuffix++;
+            newSuffix++;
+          }
+          const changeSpanEnd = oldText.length - oldSuffix;
+          const changeStart = prefixLen;
+          return {
+            span: { start: changeStart, length: changeSpanEnd - changeStart },
+            newLength: fileText.length - prefixLen - newSuffix
+          };
+        }
+        return undefined;
+      }
+    };
+
+    // Save current text for next comparison
+    previousScriptSnapshots.set(fileName, { text: fileText, version: currentVersion });
+
+    return snapshot;
   }
 
   function createLanguageServiceHost(options: ts.CompilerOptions): ts.LanguageServiceHost {
@@ -442,11 +496,7 @@ export function getServiceHost(
         if (isVirtualVueTemplateFile(fileFsPath)) {
           const doc = localScriptRegionDocuments.get(fileFsPath);
           const fileText = doc ? doc.getText() : '';
-          return {
-            getText: (start, end) => fileText.substring(start, end),
-            getLength: () => fileText.length,
-            getChangeRange: () => void 0
-          };
+          return createIncrementalSnapshot(fileFsPath, fileText);
         }
 
         // js/ts files in workspace
@@ -455,11 +505,7 @@ export function getServiceHost(
             return projectFileSnapshots.get(fileFsPath);
           }
           const fileText = tsModule.sys.readFile(fileFsPath) || '';
-          const snapshot: ts.IScriptSnapshot = {
-            getText: (start, end) => fileText.substring(start, end),
-            getLength: () => fileText.length,
-            getChangeRange: () => void 0
-          };
+          const snapshot = createIncrementalSnapshot(fileFsPath, fileText);
           projectFileSnapshots.set(fileFsPath, snapshot);
           return snapshot;
         }
@@ -476,11 +522,7 @@ export function getServiceHost(
           fileText = parseVueScript(rawVueFileText);
         }
 
-        return {
-          getText: (start, end) => fileText.substring(start, end),
-          getLength: () => fileText.length,
-          getChangeRange: () => void 0
-        };
+        return createIncrementalSnapshot(fileFsPath, fileText);
       },
       getCurrentDirectory: () => env.getProjectRoot(),
       getDefaultLibFileName: tsModule.getDefaultLibFilePath,

@@ -18,7 +18,7 @@ export function getPugMode(
   documentRegions: LanguageModelCache<VueDocumentRegions>,
   vueInfoService?: VueInfoService
 ): LanguageMode {
-  const embeddedDocuments = getLanguageModelCache<TextDocument>(10, 60, document =>
+  const embeddedDocuments = getLanguageModelCache<TextDocument>(50, 60, document =>
     documentRegions.refreshAndGet(document).getSingleLanguageDocument('pug')
   );
 

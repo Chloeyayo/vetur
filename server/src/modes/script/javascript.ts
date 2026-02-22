@@ -87,7 +87,7 @@ export async function getJavascriptMode(
   vueInfoService: VueInfoService,
   refTokensService: RefTokensService
 ): Promise<LanguageMode> {
-  const jsDocuments = getLanguageModelCache(10, 60, document => {
+  const jsDocuments = getLanguageModelCache(50, 60, document => {
     const vueDocument = documentRegions.refreshAndGet(document);
     return vueDocument.getSingleTypeDocument('script');
   });
