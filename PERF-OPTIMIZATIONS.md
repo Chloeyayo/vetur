@@ -77,6 +77,60 @@ getChangeRange: () => void 0
 
 ---
 
+## 优化 3：文件变更按影响范围验证（而非验证全部打开文件）
+
+### 问题
+
+`server/src/services/vls.ts` 的 `setupFileChangeListeners()` 中，`onDidChangeWatchedFiles` 事件处理在**任何**被监听文件变更后，都会对**所有**打开的文档触发 `triggerValidation`：
+
+```typescript
+this.documentService.getAllDocuments().forEach(d => {
+  this.triggerValidation(d);
+});
+```
+
+假设用户打开了 20 个文件，即使只修改了项目 A 中的一个 `.ts` 文件，也会触发 20 个文件全部重新验证。对于多项目工作区（monorepo），项目 B 中的文件完全不受影响，却被无谓地验证，浪费 CPU 资源。
+
+每次 `triggerValidation` 最终会调用各 language mode 的 `doValidation()`，涉及 TypeScript 语义检查、CSS 校验等，开销显著。
+
+### 改动
+
+**文件**: `server/src/services/vls.ts`
+
+1. 在 `onDidChangeWatchedFiles` 处理函数开头创建 `affectedProjectRoots: Set<string>`
+2. 对每个 change 事件（无论 Changed/Created/Deleted），通过已有的 `getProjectConfig(uri)` 查找其所属项目的 `rootFsPath`，加入集合
+3. 验证阶段：遍历所有打开文档，仅当文档路径属于受影响的项目时才触发验证
+
+```typescript
+// Only validate open documents that belong to affected projects
+this.documentService.getAllDocuments().forEach(d => {
+  const docFsPath = getFileFsPath(d.uri);
+  for (const projectRoot of affectedProjectRoots) {
+    if (docFsPath.startsWith(projectRoot)) {
+      this.triggerValidation(d);
+      return;
+    }
+  }
+});
+```
+
+**关键设计决策**:
+- `getProjectConfig()` 是同步方法（纯路径匹配），不引入异步开销
+- 项目根路径的 `Set` 收集在 `forEach` 的同步阶段完成（`await getProjectService` 之前），确保验证循环执行时数据已就绪
+- 对所有类型的文件变更（Changed/Created/Deleted）都收集项目信息，因为文件创建/删除也可能影响 import 解析
+
+### 性能影响
+
+| 场景 | 优化前 | 优化后 |
+|------|--------|--------|
+| 单项目，20 个打开文件，1 个文件变更 | 20 次 doValidate | 20 次 doValidate（同项目，无变化） |
+| 多项目工作区（3 个项目），60 个打开文件，1 个文件变更 | 60 次 doValidate | ~20 次 doValidate（仅受影响项目） |
+| monorepo，100 个打开文件跨 5 个子项目 | 100 次 doValidate | ~20 次 doValidate（~80% 减少） |
+
+对于单项目场景，所有文件属于同一个项目根，行为与原版一致。优化主要在多项目/monorepo 场景下生效。
+
+---
+
 ## 验证
 
 - `cd server && yarn test` — **185 passing, 0 failing**

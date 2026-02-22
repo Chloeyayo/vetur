@@ -484,7 +484,15 @@ export class VLS {
       this.lspConnection.sendDiagnostics({ uri: e.document.uri, diagnostics: [] });
     });
     this.lspConnection.onDidChangeWatchedFiles(({ changes }) => {
+      const affectedProjectRoots = new Set<string>();
+
       changes.forEach(async c => {
+        // Track which projects are affected by any type of file change
+        const projectConfig = this.getProjectConfig(c.uri);
+        if (projectConfig) {
+          affectedProjectRoots.add(projectConfig.rootFsPath);
+        }
+
         if (c.type === FileChangeType.Changed) {
           const fsPath = getFileFsPath(c.uri);
 
@@ -512,8 +520,16 @@ export class VLS {
         }
       });
 
+      // Only validate open documents that belong to affected projects
+      // instead of re-validating all open documents on every file change
       this.documentService.getAllDocuments().forEach(d => {
-        this.triggerValidation(d);
+        const docFsPath = getFileFsPath(d.uri);
+        for (const projectRoot of affectedProjectRoots) {
+          if (docFsPath.startsWith(projectRoot)) {
+            this.triggerValidation(d);
+            return;
+          }
+        }
       });
     });
   }
