@@ -10,6 +10,7 @@ import * as bridge from './bridge';
 import { getVueSys } from './vueSys';
 import { TemplateSourceMap, stringifySourceMapNodes } from './sourceMap';
 import { isVirtualVueTemplateFile, isVueFile } from './util';
+import { computeChangeRange } from './changeRange';
 import { logger } from '../../log';
 import { ModuleResolutionCache } from './moduleResolutionCache';
 import { globalScope } from './transformTemplate';
@@ -294,30 +295,7 @@ export function getServiceHost(
       getLength: () => fileText.length,
       getChangeRange: (oldSnapshot: ts.IScriptSnapshot) => {
         if (prev && oldSnapshot.getLength() === prev.text.length) {
-          const oldText = prev.text;
-          // Find the first character that differs
-          const minLen = Math.min(oldText.length, fileText.length);
-          let prefixLen = 0;
-          while (prefixLen < minLen && oldText.charCodeAt(prefixLen) === fileText.charCodeAt(prefixLen)) {
-            prefixLen++;
-          }
-          // Find the last character that differs (scanning from end)
-          let oldSuffix = 0;
-          let newSuffix = 0;
-          while (
-            oldSuffix < oldText.length - prefixLen &&
-            newSuffix < fileText.length - prefixLen &&
-            oldText.charCodeAt(oldText.length - 1 - oldSuffix) === fileText.charCodeAt(fileText.length - 1 - newSuffix)
-          ) {
-            oldSuffix++;
-            newSuffix++;
-          }
-          const changeSpanEnd = oldText.length - oldSuffix;
-          const changeStart = prefixLen;
-          return {
-            span: { start: changeStart, length: changeSpanEnd - changeStart },
-            newLength: fileText.length - prefixLen - newSuffix
-          };
+          return computeChangeRange(prev.text, fileText);
         }
         return undefined;
       }

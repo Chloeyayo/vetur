@@ -72,6 +72,7 @@ import { sleep } from '../utils/sleep';
 import { URI } from 'vscode-uri';
 import { getSemanticTokenLegends } from '../modes/script/semanticToken';
 import { createRefTokensService } from './RefTokenService';
+import { isDocumentInAffectedProject } from '../utils/projectScope';
 
 interface ProjectConfig {
   vlsFullConfig: VLSFullConfig;
@@ -538,11 +539,8 @@ export class VLS {
       // instead of re-validating all open documents on every file change
       this.documentService.getAllDocuments().forEach(d => {
         const docFsPath = getFileFsPath(d.uri);
-        for (const projectRoot of affectedProjectRoots) {
-          if (docFsPath.startsWith(projectRoot)) {
-            this.triggerValidation(d);
-            return;
-          }
+        if (isDocumentInAffectedProject(docFsPath, affectedProjectRoots)) {
+          this.triggerValidation(d);
         }
       });
     });
