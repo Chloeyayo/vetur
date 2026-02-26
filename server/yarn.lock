@@ -3842,10 +3842,10 @@ safe-regex@^1.1.0:
   dependencies:
     ret "~0.1.10"
 
-sass-formatter@^0.7.6:
-  version "0.7.6"
-  resolved "https://registry.yarnpkg.com/sass-formatter/-/sass-formatter-0.7.6.tgz#aa64b4120c375b71b8b7e18ff60b5f3e17081e3e"
-  integrity sha512-hXdxU6PCkiV3XAiSnX+XLqz2ohHoEnVUlrd8LEVMAI80uB1+OTScIkH9n6qQwImZpTye1r1WG1rbGUteHNhoHg==
+sass-formatter@^0.8.0:
+  version "0.8.0"
+  resolved "https://registry.yarnpkg.com/sass-formatter/-/sass-formatter-0.8.0.tgz#bd1df0d141e628c567194a28b283ede3fed80987"
+  integrity sha512-Nf4eMGE2O5vnJG7KPCRyksWS9gVKSYoUWtPeMXRRxwZSPVQhSGtL602xVYS65LvMkHmkvKa7xpauF0+/5pPwrg==
   dependencies:
     suf-log "^2.5.3"
 
